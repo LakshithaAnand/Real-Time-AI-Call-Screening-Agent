@@ -8,7 +8,7 @@ def log(call_sid, msg):
 @app.post("/voice")
 async def voice_endpoint():
     # TwiML that tells Twilio to open a media stream to our /ws endpoint.
-    # The wss host matches the current ngrok tunnel (and so does the Twilio webhook URL)
+    # The wss host matches the current ngrok tunnel (and so should the Twilio webhook URL. Both should be the same.)
     xml = """<?xml version="1.0" encoding="UTF-8"?>
     <Response><Connect><Stream url="wss://sandbar-onboard-reorder.ngrok-free.dev/ws" /></Connect></Response>"""
     
