@@ -1,6 +1,29 @@
 from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect
 import json
+import os
+import base64
+import asyncio
+import websockets
+
+DEEPGRAM_URL = (
+    "wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&channels=1&interim_results=true"
+)
+
 app = FastAPI()
+
+DEEPGRAM_API_KEY = os.environ["DEEPGRAM_API_KEY"]
+
+# Reads the audio from twilio and transcribes it using Deepgram. The transcriptions are printed to the console.
+async def read_deepgram(deepgram_websocket):
+    # Runs concurrently with the Twilio loop, printing transcripts as they arrive.
+    async for message in deepgram_websocket:
+        response = json.loads(message)
+        if response.get("type") != "Results":
+            continue
+        transcript = response["channel"]["alternatives"][0]["transcript"]
+        if transcript:
+            tag = "FINAL" if response.get("is_final") else "interim"
+            print(f"[{tag}] {transcript}")
 
 def log(call_sid, msg):
     print(f"Call SID: {call_sid} - {msg}")
@@ -20,6 +43,7 @@ async def websocket_endpoint(websocket: WebSocket):
     counter = 0
     stream_sid = None
     call_sid = None
+    deepgram_websocket = None
     try:
         while True:
             data = await websocket.receive_text()
@@ -28,8 +52,18 @@ async def websocket_endpoint(websocket: WebSocket):
             if event_type == "start":
                 print("Start event received", json.dumps(json_data, indent=2))
                 call_sid = json_data["start"]["callSid"]
-                log(call_sid, "Start event received")
                 stream_sid = json_data["start"]["streamSid"]
+                log(call_sid, "Call Started")
+
+                # NEW: dial out to Deepgram and start listening to its replies
+                deepgram_websocket = await websockets.connect(
+                    DEEPGRAM_URL,
+                    additional_headers={
+                        "Authorization": f"Token {DEEPGRAM_API_KEY}"
+                    },
+                )
+                asyncio.create_task(read_deepgram(deepgram_websocket))
+
             elif event_type == "media":
                 # Twilio sends ~50 media frames/sec of base64-encoded 8kHz mu-law audio, 20ms each.
                 counter += 1
@@ -39,16 +73,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 json_media = json_data["media"]
                 payload = json_media["payload"]
 
-                # Echo the caller's audio back to test the full pipeline.
-                # streamSid is required so Twilio knows which call stream to play it on.
-                outbound_message = {
-                    "event": "media", 
-                    "streamSid": stream_sid,
-                    "media": {
-                        "payload": payload
-                    }
-                }
-                await websocket.send_text(json.dumps(outbound_message)) 
+                 # Twilio gives base64 text and Deepgram wants the raw bytes so we decode it first.
+                if deepgram_websocket:
+                    await deepgram_websocket.send(base64.b64decode(payload))
+
             elif event_type == "stop":
                 print("Event stop")
                 log(call_sid, "stop")
@@ -57,4 +85,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 print(f"Event: {event_type}") 
     except WebSocketDisconnect:
         print("WebSocket disconnected")
-        
+
+    finally:
+        if deepgram_websocket:
+            await deepgram_websocket.close()   # hang up the Deepgram line too
+
+
+
